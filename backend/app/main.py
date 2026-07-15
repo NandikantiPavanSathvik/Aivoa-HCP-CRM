@@ -40,10 +40,10 @@ def normalize_date(date_str: str) -> Optional[str]:
     if re.match(r"^\d{4}-\d{2}-\d{2}$", sl):
         return sl
 
-    # ── Bare day-of-month: "17", "17th", "on 17", "the 17th", "on the 17th" ─
+    # ── Bare day-of-month: "17", "17th", "20 this month", "on the 17th of this month" ─
     # User says "next appointment is on 17" → resolve to 17th of current month
     day_only = re.match(
-        r"^(?:on\s+)?(?:the\s+)?(\d{1,2})(?:st|nd|rd|th)?$", sl
+        r"^(?:on\s+)?(?:the\s+)?(\d{1,2})(?:st|nd|rd|th)?(?:\s+(?:of\s+)?this\s+month)?$", sl
     )
     if day_only:
         day = int(day_only.group(1))
@@ -303,7 +303,7 @@ def chat_with_agent(request: schemas.ChatRequest, db: Session = Depends(get_db))
                     # ── Map tool args → form fields ────────────────────────────
                     if tool_name == "log_interaction":
                         # Direct 1-to-1 mapping with form schema
-                        extracted_data = {
+                        log_data = {
                             "hcp_id":        tool_args.get("hcp_id"),
                             "date":          normalize_date(tool_args.get("date")),
                             "channel":       tool_args.get("channel"),
@@ -313,8 +313,9 @@ def chat_with_agent(request: schemas.ChatRequest, db: Session = Depends(get_db))
                             "follow_up_date": normalize_date(tool_args.get("follow_up_date")),
                             "next_step":     tool_args.get("next_step"),
                         }
-                        # Remove None/empty values so the frontend only updates what's present
-                        extracted_data = {k: v for k, v in extracted_data.items() if v is not None}
+                        # Remove None/empty values so we only update what's present
+                        log_data = {k: v for k, v in log_data.items() if v is not None}
+                        extracted_data = {**(extracted_data or {}), **log_data}
 
                     elif tool_name == "edit_interaction":
                         # For edits, only send the fields that were actually changed

@@ -587,10 +587,14 @@ def _build_groq_tools():
         defs = raw_schema.get("$defs", {})
         raw_props = raw_schema.get("properties", {})
 
-        cleaned_props = {
-            k: _simplify_prop(v, defs)
-            for k, v in raw_props.items()
-        }
+        cleaned_props = {}
+        for k, v in raw_props.items():
+            prop = _simplify_prop(v, defs)
+            # Prevent Groq type validation errors by allowing IDs to be sent as strings
+            if k == "hcp_id" or k == "interaction_id" or k.endswith("_id"):
+                prop["type"] = "string"
+                prop["description"] = prop.get("description", "") + " (pass as string or number)"
+            cleaned_props[k] = prop
 
         params = {
             "type": "object",
