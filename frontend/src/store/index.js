@@ -25,8 +25,16 @@ export const logNewInteraction = createAsyncThunk('interactions/logNewInteractio
     body: JSON.stringify(interactionData),
   });
   if (!response.ok) {
-    const errData = await response.json();
-    throw new Error(errData.detail || 'Failed to log interaction');
+    let errMsg = 'Failed to log interaction';
+    try {
+      const errData = await response.json();
+      if (typeof errData.detail === 'string') {
+        errMsg = errData.detail;
+      } else if (Array.isArray(errData.detail)) {
+        errMsg = errData.detail.map(e => `${e.loc[e.loc.length - 1]}: ${e.msg}`).join(', ');
+      }
+    } catch (_) {}
+    throw new Error(errMsg);
   }
   return await response.json();
 });
@@ -38,8 +46,16 @@ export const updateExistingInteraction = createAsyncThunk('interactions/updateEx
     body: JSON.stringify(data),
   });
   if (!response.ok) {
-    const errData = await response.json();
-    throw new Error(errData.detail || 'Failed to update interaction');
+    let errMsg = 'Failed to update interaction';
+    try {
+      const errData = await response.json();
+      if (typeof errData.detail === 'string') {
+        errMsg = errData.detail;
+      } else if (Array.isArray(errData.detail)) {
+        errMsg = errData.detail.map(e => `${e.loc[e.loc.length - 1]}: ${e.msg}`).join(', ');
+      }
+    } catch (_) {}
+    throw new Error(errMsg);
   }
   return await response.json();
 });
@@ -183,6 +199,7 @@ const interactionSlice = createSlice({
       };
       state.editingInteractionId = null;
       state.extractedFields = [];
+      state.error = null;
     },
     startEditingInteraction: (state, action) => {
       const interaction = action.payload;
@@ -198,6 +215,7 @@ const interactionSlice = createSlice({
         next_step: interaction.next_step || '',
       };
       state.extractedFields = [];
+      state.error = null;
     }
   },
   extraReducers: (builder) => {
@@ -205,10 +223,12 @@ const interactionSlice = createSlice({
       // Fetch interactions
       .addCase(fetchInteractions.pending, (state) => {
         state.loading = true;
+        state.error = null;
       })
       .addCase(fetchInteractions.fulfilled, (state, action) => {
         state.loading = false;
         state.list = action.payload;
+        state.error = null;
       })
       .addCase(fetchInteractions.rejected, (state, action) => {
         state.loading = false;
@@ -217,12 +237,14 @@ const interactionSlice = createSlice({
       // Log interaction
       .addCase(logNewInteraction.pending, (state) => {
         state.saving = true;
+        state.error = null;
       })
       .addCase(logNewInteraction.fulfilled, (state, action) => {
         state.saving = false;
         state.list.unshift(action.payload);
         state.activeForm = { ...defaultFormState, hcp_id: state.activeForm.hcp_id };
         state.extractedFields = [];
+        state.error = null;
       })
       .addCase(logNewInteraction.rejected, (state, action) => {
         state.saving = false;
@@ -231,6 +253,7 @@ const interactionSlice = createSlice({
       // Update interaction
       .addCase(updateExistingInteraction.pending, (state) => {
         state.saving = true;
+        state.error = null;
       })
       .addCase(updateExistingInteraction.fulfilled, (state, action) => {
         state.saving = false;
@@ -241,6 +264,7 @@ const interactionSlice = createSlice({
         }
         state.activeForm = { ...defaultFormState, hcp_id: state.activeForm.hcp_id };
         state.extractedFields = [];
+        state.error = null;
       })
       .addCase(updateExistingInteraction.rejected, (state, action) => {
         state.saving = false;

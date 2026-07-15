@@ -1,6 +1,6 @@
 import React, { useEffect } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
-import { updateFormField, logNewInteraction, updateExistingInteraction, resetForm, clearFormHighlight } from '../store';
+import { updateFormField, logNewInteraction, updateExistingInteraction, resetForm, clearFormHighlight, fetchHCPs } from '../store';
 import { Check, ClipboardList, AlertCircle, RefreshCw, X } from 'lucide-react';
 
 const InteractionForm = () => {
@@ -39,9 +39,13 @@ const InteractionForm = () => {
       dispatch(updateExistingInteraction({
         id: editingInteractionId,
         data: activeForm
-      }));
+      })).then(() => {
+        dispatch(fetchHCPs());
+      });
     } else {
-      dispatch(logNewInteraction(activeForm));
+      dispatch(logNewInteraction(activeForm)).then(() => {
+        dispatch(fetchHCPs());
+      });
     }
   };
 
