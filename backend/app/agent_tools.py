@@ -2,6 +2,7 @@ from langchain_core.tools import tool
 from app.database import SessionLocal, HCP, Interaction
 import datetime
 import logging
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -66,9 +67,9 @@ def log_interaction(
     topics: str,
     sentiment: str,
     notes: str,
-    follow_up_date: str = None,
-    next_step: str = None,
-    raw_text: str = None
+    follow_up_date: Optional[str] = None,
+    next_step: Optional[str] = None,
+    raw_text: Optional[str] = None
 ) -> str:
     """
     Log a new interaction with an HCP.
@@ -136,13 +137,13 @@ def log_interaction(
 @tool
 def edit_interaction(
     interaction_id: int,
-    date: str = None,
-    channel: str = None,
-    topics: str = None,
-    sentiment: str = None,
-    notes: str = None,
-    follow_up_date: str = None,
-    next_step: str = None
+    date: Optional[str] = None,
+    channel: Optional[str] = None,
+    topics: Optional[str] = None,
+    sentiment: Optional[str] = None,
+    notes: Optional[str] = None,
+    follow_up_date: Optional[str] = None,
+    next_step: Optional[str] = None
 ) -> str:
     """
     Edit/Modify an existing logged interaction. Provide only the fields that need updating.
@@ -244,5 +245,174 @@ def schedule_followup(hcp_id: int, follow_up_date: str, next_step: str) -> str:
     finally:
         db.close()
 
-# List of all tools for convenient binding
-sales_tools = [search_hcp, get_interaction_history, log_interaction, edit_interaction, schedule_followup]
+
+@tool
+def get_hcp_profile(hcp_id: int) -> str:
+    """
+    Get the full profile details of a Healthcare Professional (HCP) by their ID.
+    Use this tool to retrieve name, specialty, clinic, email, phone and last interaction date.
+    """
+    db = SessionLocal()
+    try:
+        hcp = db.query(HCP).filter(HCP.id == hcp_id).first()
+        if not hcp:
+            return f"Error: HCP with ID {hcp_id} not found."
+        return (
+            f"HCP Profile:\n"
+            f"- ID: {hcp.id}\n"
+            f"- Name: {hcp.name}\n"
+            f"- Specialty: {hcp.specialty}\n"
+            f"- Clinic: {hcp.clinic_name}\n"
+            f"- Email: {hcp.email or 'N/A'}\n"
+            f"- Phone: {hcp.phone or 'N/A'}\n"
+            f"- Last Interaction: {hcp.last_interaction_date or 'No prior visits'}"
+        )
+    except Exception as e:
+        logger.error(f"Error in get_hcp_profile tool: {e}")
+        return f"Error retrieving HCP profile: {str(e)}"
+    finally:
+        db.close()
+
+@tool
+def suggest_next_best_action(hcp_id: int) -> str:
+    """
+    Analyze an HCP's interaction history and suggest the next best sales action.
+    Returns a strategic recommendation for the sales representative based on past visits,
+    sentiment trends, and outstanding follow-ups.
+    """
+    db = SessionLocal()
+    try:
+        hcp = db.query(HCP).filter(HCP.id == hcp_id).first()
+        if not hcp:
+            return f"Error: HCP with ID {hcp_id} not found."
+
+        interactions = (
+            db.query(Interaction)
+            .filter(Interaction.hcp_id == hcp_id)
+            .order_by(Interaction.date.desc())
+            .limit(5)
+            .all()
+        )
+
+        if not interactions:
+            return (
+                f"No prior interactions found for {hcp.name}. "
+                f"Recommendation: Schedule an introductory in-person visit to introduce your product portfolio."
+            )
+
+        latest = interactions[0]
+        sentiments = [i.sentiment for i in interactions]
+        positive_count = sentiments.count("Positive")
+        negative_count = sentiments.count("Negative")
+        pending_followups = [i for i in interactions if i.follow_up_date and not i.next_step]
+
+        suggestion_lines = [f"Next Best Action for {hcp.name} ({hcp.specialty} — {hcp.clinic_name}):"]
+
+        # Pending follow-up check
+        if latest.follow_up_date:
+            suggestion_lines.append(
+                f"• URGENT: Outstanding follow-up on {latest.follow_up_date} — '{latest.next_step or 'check-in'}'. Prioritize this."
+            )
+
+        # Sentiment-based strategy
+        if positive_count >= len(interactions) * 0.6:
+            suggestion_lines.append(
+                "• Sentiment is consistently POSITIVE. Consider proposing a formal trial enrollment or co-pay program."
+            )
+        elif negative_count >= len(interactions) * 0.4:
+            suggestion_lines.append(
+                "• CAUTION: Mixed/negative sentiment detected. Recommend a relationship-rebuilding visit with updated clinical evidence."
+            )
+        else:
+            suggestion_lines.append(
+                "• Sentiment is NEUTRAL. Share new product data or case studies to increase engagement."
+            )
+
+        # Topic-based recommendation
+        last_topics = latest.topics.lower() if latest.topics else ""
+        if "trial" in last_topics or "enrollment" in last_topics:
+            suggestion_lines.append("• Follow up specifically on clinical trial enrollment status.")
+        if "brochure" in last_topics or "sample" in last_topics:
+            suggestion_lines.append("• Ensure promised brochures/samples have been delivered.")
+
+        suggestion_lines.append(f"• Last channel used: {latest.channel}. Consider alternating with a different channel for variety.")
+
+        return "\n".join(suggestion_lines)
+    except Exception as e:
+        logger.error(f"Error in suggest_next_best_action tool: {e}")
+        return f"Error generating next best action: {str(e)}"
+    finally:
+        db.close()
+
+
+
+@tool
+def create_hcp(
+    name: str,
+    specialty: str = "General Practice",
+    clinic_name: str = "Unknown Clinic",
+    email: Optional[str] = None,
+    phone: Optional[str] = None,
+) -> str:
+    """
+    Create and register a new Healthcare Professional (HCP) in the database.
+    Use this tool when search_hcp returns no results for a doctor the representative mentions.
+
+    Parameters:
+    - name: Full name of the HCP (e.g. 'Dr. Pavan Nandikanti').
+    - specialty: Medical specialty (e.g. 'Cardiology', 'General Practice').
+    - clinic_name: Name of the clinic or hospital.
+    - email: Optional email address.
+    - phone: Optional phone number.
+
+    Returns the new HCP's ID so it can be used immediately in log_interaction.
+    """
+    db = SessionLocal()
+    try:
+        # Check if already exists (avoid duplicates)
+        existing = db.query(HCP).filter(HCP.name.ilike(f"%{name}%")).first()
+        if existing:
+            return (
+                f"HCP '{existing.name}' already exists in the database.\n"
+                f"ID: {existing.id} | Specialty: {existing.specialty} | Clinic: {existing.clinic_name}"
+            )
+
+        new_hcp = HCP(
+            name=name,
+            specialty=specialty,
+            clinic_name=clinic_name,
+            email=email,
+            phone=phone,
+            last_interaction_date=None,
+        )
+        db.add(new_hcp)
+        db.commit()
+        db.refresh(new_hcp)
+
+        return (
+            f"SUCCESS: New HCP created successfully.\n"
+            f"- ID: {new_hcp.id}\n"
+            f"- Name: {new_hcp.name}\n"
+            f"- Specialty: {new_hcp.specialty}\n"
+            f"- Clinic: {new_hcp.clinic_name}\n"
+            f"You can now log interactions for this HCP using ID {new_hcp.id}."
+        )
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error in create_hcp tool: {e}")
+        return f"Error creating HCP: {str(e)}"
+    finally:
+        db.close()
+
+
+# List of all tools for LangGraph agent binding
+sales_tools = [
+    search_hcp,
+    create_hcp,
+    get_interaction_history,
+    log_interaction,
+    edit_interaction,
+    schedule_followup,
+    get_hcp_profile,
+    suggest_next_best_action,
+]

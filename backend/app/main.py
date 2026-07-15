@@ -1,4 +1,7 @@
+import json
 import logging
+import datetime
+import re
 from contextlib import asynccontextmanager
 from typing import List, Dict, Any, Optional
 from fastapi import FastAPI, Depends, HTTPException, status
@@ -10,6 +13,127 @@ from app.config import settings
 from app.database import get_db, create_tables, HCP, Interaction
 from app import schemas
 from app.agent import graph
+
+
+def normalize_date(date_str: str) -> Optional[str]:
+    """
+    Convert any date string the LLM might produce → YYYY-MM-DD.
+    Returns None (no update) rather than falling back to today for
+    unrecognised strings — avoids overwriting the form with wrong dates.
+    """
+    if not date_str:
+        return None
+    s = date_str.strip()
+    sl = s.lower()
+
+    today = datetime.date.today()
+
+    # ── Relative keywords ─────────────────────────────────────────────────────
+    if sl in ("today", "now"):
+        return today.strftime("%Y-%m-%d")
+    if sl == "yesterday":
+        return (today - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+    if sl in ("tomorrow", "next day"):
+        return (today + datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+
+    # ── Already ISO format ────────────────────────────────────────────────────
+    if re.match(r"^\d{4}-\d{2}-\d{2}$", sl):
+        return sl
+
+    # ── Bare day-of-month: "17", "17th", "on 17", "the 17th", "on the 17th" ─
+    # User says "next appointment is on 17" → resolve to 17th of current month
+    day_only = re.match(
+        r"^(?:on\s+)?(?:the\s+)?(\d{1,2})(?:st|nd|rd|th)?$", sl
+    )
+    if day_only:
+        day = int(day_only.group(1))
+        if 1 <= day <= 31:
+            try:
+                target = today.replace(day=day)
+                # If that day has already passed this month, use next month
+                if target < today:
+                    if today.month == 12:
+                        target = datetime.date(today.year + 1, 1, day)
+                    else:
+                        target = datetime.date(today.year, today.month + 1, day)
+                return target.strftime("%Y-%m-%d")
+            except ValueError:
+                pass  # e.g. Feb 30 — fall through
+
+    # ── Named-month patterns: "July 17", "17 July", "17th July", "July 17th" ─
+    month_map = {
+        "january": 1, "february": 2, "march": 3, "april": 4,
+        "may": 5, "june": 6, "july": 7, "august": 8,
+        "september": 9, "october": 10, "november": 11, "december": 12,
+        "jan": 1, "feb": 2, "mar": 3, "apr": 4,
+        "jun": 6, "jul": 7, "aug": 8, "sep": 9,
+        "oct": 10, "nov": 11, "dec": 12,
+    }
+    for mname, mnum in month_map.items():
+        if mname in sl:
+            dm = re.search(r"(\d{1,2})", sl)
+            ym = re.search(r"\b(20\d{2})\b", sl)
+            if dm:
+                day = int(dm.group(1))
+                year = int(ym.group(1)) if ym else today.year
+                try:
+                    target = datetime.date(year, mnum, day)
+                    if target < today and not ym:
+                        target = datetime.date(today.year + 1, mnum, day)
+                    return target.strftime("%Y-%m-%d")
+                except ValueError:
+                    pass
+
+    # ── "next <weekday>" e.g. "next Friday" ──────────────────────────────────
+    weekday_map = {
+        "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+        "friday": 4, "saturday": 5, "sunday": 6,
+    }
+    for wname, wnum in weekday_map.items():
+        if wname in sl:
+            days_ahead = (wnum - today.weekday()) % 7
+            if days_ahead == 0:
+                days_ahead = 7  # "next Friday" when today is Friday → next week
+            return (today + datetime.timedelta(days=days_ahead)).strftime("%Y-%m-%d")
+
+    # ── Explicit format parsing ───────────────────────────────────────────────
+    for fmt in ("%d-%m-%Y", "%d/%m/%Y", "%Y/%m/%d",
+                "%m-%d-%Y", "%m/%d/%Y",
+                "%B %d %Y", "%B %d, %Y", "%d %B %Y"):
+        try:
+            return datetime.datetime.strptime(s, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+
+    # ── Relative numeric offsets ──────────────────────────────────────────────
+    days_m  = re.search(r"(\d+)\s+days?", sl)
+    weeks_m = re.search(r"(\d+)\s+weeks?", sl)
+    months_m = re.search(r"(\d+)\s+months?", sl)
+
+    if days_m:
+        base = today
+        if "yesterday" in sl:
+            base = today - datetime.timedelta(days=1)
+        elif "tomorrow" in sl:
+            base = today + datetime.timedelta(days=1)
+        return (base + datetime.timedelta(days=int(days_m.group(1)))).strftime("%Y-%m-%d")
+
+    if weeks_m:
+        return (today + datetime.timedelta(weeks=int(weeks_m.group(1)))).strftime("%Y-%m-%d")
+
+    if months_m:
+        months = int(months_m.group(1))
+        m = today.month + months
+        y = today.year + (m - 1) // 12
+        m = ((m - 1) % 12) + 1
+        import calendar
+        d = min(today.day, calendar.monthrange(y, m)[1])
+        return datetime.date(y, m, d).strftime("%Y-%m-%d")
+
+    # ── No match — return None so form is NOT incorrectly overwritten ─────────
+    return None
+
+
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -113,88 +237,137 @@ def update_interaction(interaction_id: int, interaction_in: schemas.InteractionU
 def chat_with_agent(request: schemas.ChatRequest, db: Session = Depends(get_db)):
     try:
         lang_messages = []
-        
-        # 1. Inject contextual System Message if an HCP is active in UI
+
+        # 1. Inject contextual System Message when an HCP is selected in the UI
         if request.hcp_id:
             hcp = db.query(HCP).filter(HCP.id == request.hcp_id).first()
             if hcp:
                 context_prompt = (
-                    f"CONTEXT: The sales representative has currently selected HCP: {hcp.name} (ID: {hcp.id}, Specialty: {hcp.specialty}). "
-                    f"If the user asks to log an interaction or schedule a follow-up, default to using this HCP ID ({hcp.id}) "
-                    f"unless they explicitly refer to another HCP name."
+                    f"CONTEXT: The sales representative has currently selected HCP: {hcp.name} "
+                    f"(ID: {hcp.id}, Specialty: {hcp.specialty}, Clinic: {hcp.clinic_name}). "
+                    f"If the user asks to log an interaction or schedule a follow-up, "
+                    f"use this HCP ID ({hcp.id}) directly — do NOT search for the HCP again unless they explicitly name a different doctor."
                 )
                 lang_messages.append(SystemMessage(content=context_prompt))
-        
-        # 2. Map chat history from frontend to LangChain message models
+
+        # 2. Map frontend chat history → LangChain message models
+        # NOTE: We intentionally exclude tool_calls from history messages.
+        # Re-injecting old tool call schemas confuses the model and causes
+        # it to generate malformed <function=...> XML instead of JSON tool calls.
         if request.history:
             for item in request.history:
-                role = item.get("role")
+                role    = item.get("role")
                 content = item.get("content", "")
                 if role == "user":
                     lang_messages.append(HumanMessage(content=content))
                 elif role == "assistant":
-                    # Reconstruct mock or real tool calls if present in history
-                    tool_calls = item.get("tool_calls", None)
-                    if tool_calls:
-                        lang_messages.append(AIMessage(content=content, tool_calls=tool_calls))
-                    else:
-                        lang_messages.append(AIMessage(content=content))
+                    # Always append as plain text — no tool_calls in history
+                    lang_messages.append(AIMessage(content=content))
                 elif role == "system":
                     lang_messages.append(SystemMessage(content=content))
-                elif role == "tool":
-                    lang_messages.append(ToolMessage(content=content, tool_call_id=item.get("tool_call_id", "")))
-        
-        # Append the new user message
+                # Skip "tool" role messages from history — they are part of the old turn
+
+        # 3. Append the new user message
         lang_messages.append(HumanMessage(content=request.message))
-        
-        # 3. Invoke LangGraph agent loop
+
+        # 4. Invoke LangGraph agent
+        logger.info(f"Invoking LangGraph agent with {len(lang_messages)} messages.")
         response = graph.invoke({"messages": lang_messages})
+
+        # 5. Process only response messages from the current turn
+        new_messages = response.get("messages", [])[len(lang_messages):]
         
-        # 4. Process response messages to extract agent's text and tool activities
-        agent_reply = ""
+        agent_reply    = ""
         extracted_data = None
         tools_triggered = []
-        
-        # Search backwards to find the final text output and tool calls
-        for msg in reversed(response["messages"]):
+
+        # Collect tool calls only from new messages in this turn
+        for msg in new_messages:
             if isinstance(msg, AIMessage):
-                if not agent_reply and msg.content:
-                    agent_reply = msg.content
-                
-                # Check for tool invocations
-                if msg.tool_calls:
-                    for tc in msg.tool_calls:
-                        tools_triggered.append({
-                            "name": tc["name"],
-                            "args": tc["args"],
-                            "id": tc.get("id", "")
-                        })
-                        
-                        # Capture arguments from logging/editing tools to sync with React form
-                        if tc["name"] in ["log_interaction", "edit_interaction"]:
-                            extracted_data = tc["args"]
-                        elif tc["name"] == "schedule_followup":
-                            # We can also populate scheduling details
-                            extracted_data = {
-                                "follow_up_date": tc["args"].get("follow_up_date"),
-                                "next_step": tc["args"].get("next_step")
-                            }
-        
-        # Fallback if no AIMessage found with text (unlikely)
+                # Capture the last non-empty text reply
+                if msg.content and str(msg.content).strip():
+                    agent_reply = str(msg.content).strip()
+
+                # Collect every tool call
+                for tc in (getattr(msg, "tool_calls", None) or []):
+                    tool_name = tc.get("name") or tc.get("function", {}).get("name", "")
+                    tool_args = tc.get("args") or tc.get("function", {}).get("arguments", {})
+                    if isinstance(tool_args, str):
+                        try:
+                            tool_args = json.loads(tool_args)
+                        except Exception:
+                            tool_args = {}
+                    tool_id = tc.get("id", "")
+                    tools_triggered.append({"name": tool_name, "args": tool_args, "id": tool_id})
+
+                    # ── Map tool args → form fields ────────────────────────────
+                    if tool_name == "log_interaction":
+                        # Direct 1-to-1 mapping with form schema
+                        extracted_data = {
+                            "hcp_id":        tool_args.get("hcp_id"),
+                            "date":          normalize_date(tool_args.get("date")),
+                            "channel":       tool_args.get("channel"),
+                            "topics":        tool_args.get("topics"),
+                            "sentiment":     tool_args.get("sentiment"),
+                            "notes":         tool_args.get("notes"),
+                            "follow_up_date": normalize_date(tool_args.get("follow_up_date")),
+                            "next_step":     tool_args.get("next_step"),
+                        }
+                        # Remove None/empty values so the frontend only updates what's present
+                        extracted_data = {k: v for k, v in extracted_data.items() if v is not None}
+
+                    elif tool_name == "edit_interaction":
+                        # For edits, only send the fields that were actually changed
+                        edit_fields = {}
+                        field_map = {
+                            "date": "date",
+                            "channel": "channel",
+                            "topics": "topics",
+                            "sentiment": "sentiment",
+                            "notes": "notes",
+                            "follow_up_date": "follow_up_date",
+                            "next_step": "next_step",
+                        }
+                        for arg_key, form_key in field_map.items():
+                            val = tool_args.get(arg_key)
+                            if val is not None:
+                                if form_key in ["date", "follow_up_date"]:
+                                    edit_fields[form_key] = normalize_date(val)
+                                else:
+                                    edit_fields[form_key] = val
+                        if edit_fields:
+                            # Merge with existing extracted_data if any
+                            extracted_data = {**(extracted_data or {}), **edit_fields}
+
+                    elif tool_name == "schedule_followup":
+                        sched_fields = {}
+                        if tool_args.get("follow_up_date"):
+                            sched_fields["follow_up_date"] = normalize_date(tool_args["follow_up_date"])
+                        if tool_args.get("next_step"):
+                            sched_fields["next_step"] = tool_args["next_step"]
+                        if sched_fields:
+                            extracted_data = {**(extracted_data or {}), **sched_fields}
+
+        # Fallback reply so it's never empty
         if not agent_reply:
-            agent_reply = "I've processed your request."
-            
+            agent_reply = "I've processed your request. Is there anything else you need?"
+
+        logger.info(
+            f"Chat response: {len(tools_triggered)} tools triggered, "
+            f"extracted_data={'yes' if extracted_data else 'no'}"
+        )
+
         return schemas.ChatResponse(
             reply=agent_reply,
             extracted_data=extracted_data,
-            tools_triggered=tools_triggered
+            tools_triggered=tools_triggered,
         )
-        
+
     except Exception as e:
-        logger.error(f"Error in chat_with_agent endpoint: {e}")
+        logger.error(f"Error in chat_with_agent: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"AI Agent error: {str(e)}"
+            detail=f"AI Agent error: {str(e)}",
         )
 
 # ----------------- DB Maintenance Endpoints -----------------

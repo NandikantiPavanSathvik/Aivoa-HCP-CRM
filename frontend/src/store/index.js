@@ -50,23 +50,31 @@ export const sendChatMessage = createAsyncThunk('chat/sendChatMessage', async ({
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ message, history, hcp_id: hcpId }),
   });
-  if (!response.ok) throw new Error('Failed to chat with agent');
+  if (!response.ok) {
+    let errMsg = `Server error ${response.status}`;
+    try {
+      const errData = await response.json();
+      errMsg = errData.detail || errMsg;
+    } catch (_) {}
+    throw new Error(errMsg);
+  }
   const data = await response.json();
-  
-  // If the agent returned extracted data, we automatically populate the active form in Redux!
-  if (data.extracted_data) {
+
+  // If the agent extracted form data, auto-populate the interaction form in Redux
+  if (data.extracted_data && Object.keys(data.extracted_data).length > 0) {
     dispatch(populateActiveForm(data.extracted_data));
   }
-  
-  // If the agent successfully logged a new interaction or updated one via tools, we re-fetch history
-  const containsLogTool = data.tools_triggered?.some(t => t.name === 'log_interaction' || t.name === 'edit_interaction' || t.name === 'schedule_followup');
-  if (containsLogTool) {
+
+  // If a log/edit/schedule tool was triggered, refresh the interaction list & HCP list
+  const formChangingTools = ['log_interaction', 'edit_interaction', 'schedule_followup'];
+  const containsFormTool = data.tools_triggered?.some(t => formChangingTools.includes(t.name));
+  if (containsFormTool) {
     setTimeout(() => {
       dispatch(fetchInteractions(hcpId));
       dispatch(fetchHCPs()); // refresh last interaction date
-    }, 500);
+    }, 600);
   }
-  
+
   return data;
 });
 
@@ -149,16 +157,21 @@ const interactionSlice = createSlice({
     populateActiveForm: (state, action) => {
       const data = action.payload;
       const fieldsToHighlight = [];
-      
-      // Update form fields with keys matching form state
-      Object.keys(defaultFormState).forEach(field => {
-        if (data[field] !== undefined && data[field] !== null) {
-          // Map lists/comma strings safely
+
+      // Merge extracted data into the form — only update fields that are present.
+      // This is critical for edit_interaction where only specific fields change.
+      const formFields = ['hcp_id', 'date', 'channel', 'topics', 'sentiment', 'notes', 'follow_up_date', 'next_step'];
+      formFields.forEach(field => {
+        if (data[field] !== undefined && data[field] !== null && data[field] !== '') {
           state.activeForm[field] = data[field];
           fieldsToHighlight.push(field);
         }
       });
-      state.extractedFields = fieldsToHighlight;
+
+      // Highlight all updated fields (triggers CSS pulse animations)
+      if (fieldsToHighlight.length > 0) {
+        state.extractedFields = fieldsToHighlight;
+      }
     },
     clearFormHighlight: (state) => {
       state.extractedFields = [];

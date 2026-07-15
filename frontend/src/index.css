@@ -592,50 +592,26 @@ body {
 }
 
 .tool-logs {
-  margin-top: 0.75rem;
-  padding-top: 0.5rem;
+  margin-top: 0.6rem;
+  padding-top: 0.4rem;
   border-top: 1px solid rgba(255, 255, 255, 0.04);
-  font-size: 0.75rem;
-}
-
-.tool-log-header {
   display: flex;
   align-items: center;
-  gap: 0.25rem;
+  gap: 0.4rem;
+  font-size: 0.7rem;
   color: var(--text-muted);
-  font-weight: 500;
-  margin-bottom: 0.35rem;
 }
 
 .tool-icon {
   color: var(--accent);
+  opacity: 0.7;
+  flex-shrink: 0;
 }
 
-.tool-pill {
-  background: rgba(168, 85, 247, 0.08);
-  border: 1px solid rgba(168, 85, 247, 0.2);
-  border-radius: 6px;
-  padding: 0.25rem 0.5rem;
-  margin-bottom: 0.25rem;
-  display: flex;
-  flex-direction: column;
-  gap: 0.1rem;
-}
-
-.tool-pill-icon {
-  color: var(--accent);
-}
-
-.tool-pill-name {
-  font-weight: 600;
-  color: #c084fc;
-}
-
-.tool-pill-args {
-  color: var(--text-secondary);
-  font-family: monospace;
-  font-size: 0.65rem;
-  word-break: break-all;
+.tool-log-summary {
+  color: var(--text-muted);
+  font-style: italic;
+  opacity: 0.8;
 }
 
 .voice-status-bar {
@@ -1074,4 +1050,54 @@ select.form-input option {
   padding: 2.5rem !important;
   color: var(--text-secondary);
   font-style: italic;
+}
+
+/* ─── Prompt Suggestion Chips ─────────────────────────────────────────────── */
+.prompt-chips-container {
+  padding: 0.5rem 1rem 0.6rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.prompt-chips-label {
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 0.45rem;
+}
+
+.prompt-chips {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  max-height: 130px;
+  overflow-y: auto;
+}
+
+.prompt-chip {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  background: rgba(0, 242, 254, 0.04);
+  border: 1px solid rgba(0, 242, 254, 0.12);
+  border-radius: 7px;
+  padding: 0.38rem 0.7rem;
+  cursor: pointer;
+  text-align: left;
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  line-height: 1.35;
+  transition: var(--transition);
+}
+
+.prompt-chip:hover {
+  background: rgba(0, 242, 254, 0.1);
+  border-color: var(--primary);
+  color: var(--primary);
+  transform: translateX(2px);
+}
+
+.prompt-chip svg {
+  flex-shrink: 0;
+  opacity: 0.5;
 }
